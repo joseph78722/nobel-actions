@@ -1,0 +1,84 @@
+name: Catálogo Nobel
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nobel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python catalogo.py validar
+
+  generar:
+    needs: validar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python catalogo.py generar
+      - name: Guardar vista previa en la ejecución
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vista-previa
+          path: public/
+      - name: Preparar artefacto de Pages
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public/
+
+  publicar:
+    needs: generar
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  verificar:
+    needs: publicar
+    runs-on: ubuntu-latest
+    env:
+      PAGE_URL: ${{ needs.publicar.outputs.page_url }}
+    steps:
+      - name: Verificar el commit y el catálogo en el sitio público
+        run: |
+          set -eu
+          base="${PAGE_URL%/}"
+          for intento in $(seq 1 12); do
+            publicado=$(curl -fsS --max-time 10 "$base/commit.txt?rev=$GITHUB_SHA&intento=$intento" || true)
+            if [ "$publicado" = "$GITHUB_SHA" ] &&
+              curl -fsS --max-time 10 "$base/premios.json?rev=$GITHUB_SHA" -o /dev/null &&
+              curl -fsS --max-time 10 "$base/index.html?rev=$GITHUB_SHA" -o /dev/null; then
+              echo "Publicación verificada: $publicado"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "No se pudo verificar la versión publicada."
+          exit 1
